@@ -12,6 +12,21 @@ import "strconv"
 // Add your RPC definitions here.
 type GetTaskArgs struct{}
 
+type GetTaskReply int
+
+const (
+	GetTask_HasTask = iota
+	GetTask_Wait
+	GetTask_Finished
+)
+
+type HeartBeatArgs struct {
+	Task TaskInfo
+}
+
+type HeartBeatReply struct{}
+type TaskDoneReply struct{}
+
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
 // Can't use the current directory since

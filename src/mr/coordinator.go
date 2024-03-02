@@ -2,6 +2,7 @@ package mr
 
 import (
 	"log"
+	"strconv"
 	"time"
 )
 import "net"
@@ -28,7 +29,6 @@ const (
 	Unstarted TaskStatus = iota
 	InProgress
 	Completed
-	Failed
 )
 
 const (
@@ -41,16 +41,15 @@ type TaskInfo struct {
 	TaskType             TaskType
 	IntermediateFilePath string // 任务的中间文件路径
 	MapFilePath          string // Map任务需要处理的文件路径
-	ReduceKeys           []int  // Reduce任务需要处理的Key
 	Status               TaskStatus
 	StartTime            time.Time
+	MapTaskCount         int // Map任务的数量
 }
 
 const (
 	WorkerGetTask ThreadMessageType = iota
 	WorkerHeartBeat
 	WorkerTaskDone
-	WorkerTaskFailed
 	WorkerTaskTimeOut
 )
 
@@ -94,6 +93,13 @@ func (c *Coordinator) chooseReduceTask() *TaskInfo {
 	return nil
 }
 
+// checkTaskTimeout 发起一个定时函数，检查任务是否超时
+func (c *Coordinator) checkTaskTimeout(info *TaskInfo) {
+	time.Sleep(TaskTimeOut)
+	// 向 MessageChan 发送消息
+	c.MessageChan <- ThreadMessage{MsgType: WorkerTaskTimeOut, Task: *info}
+}
+
 // chooseTask 选择一个任务
 func (c *Coordinator) chooseTask() *TaskInfo {
 	task := &TaskInfo{}
@@ -106,8 +112,33 @@ func (c *Coordinator) chooseTask() *TaskInfo {
 	if task != nil {
 		task.StartTime = time.Now()
 		task.Status = InProgress
+		go c.checkTaskTimeout(task)
 	}
+
 	return task
+}
+
+// updatePhase 更新阶段，判断是否需要切换阶段
+func (c *Coordinator) updatePhase() {
+	// 如果当前阶段是Map阶段，判断是否所有的Map任务都已经完成
+	if c.CoordinatorPhase == MapPhase {
+		for i := 0; i < len(c.MapTasks); i++ {
+			if c.MapTasks[i].Status != Completed {
+				return
+			}
+		}
+		c.CoordinatorPhase = ReducePhase
+	}
+
+	// 如果当前阶段是Reduce阶段，判断是否所有的Reduce任务都已经完成
+	if c.CoordinatorPhase == ReducePhase {
+		for i := 0; i < len(c.ReduceTasks); i++ {
+			if c.ReduceTasks[i].Status != Completed {
+				return
+			}
+		}
+		c.CoordinatorPhase = Finished
+	}
 }
 
 // GetTask 暴露给Worker的RPC接口
@@ -116,6 +147,46 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *TaskInfo) error {
 	c.MessageChan <- ThreadMessage{MsgType: WorkerGetTask}
 	msg := <-c.MessageChan
 	*reply = msg.Task
+	return nil
+}
+
+// HeartBeat 暴露给Worker的RPC接口
+func (c *Coordinator) HeartBeat(args *HeartBeatArgs, reply *HeartBeatReply) error {
+	// 向 MessageChan 发送消息
+	c.MessageChan <- ThreadMessage{MsgType: WorkerHeartBeat, Task: args.Task}
+	return nil
+}
+
+// TaskDone 暴露给Worker的RPC接口
+func (c *Coordinator) TaskDone(args *TaskInfo, reply *TaskDoneReply) error {
+	// 向 MessageChan 发送消息
+	c.MessageChan <- ThreadMessage{MsgType: WorkerTaskDone, Task: *args}
+	*reply = TaskDoneReply{}
+	return nil
+}
+
+// HasMoreTask 暴露给Worker的RPC接口
+func (c *Coordinator) HasMoreTask(args *GetTaskArgs, reply *GetTaskReply) error {
+	if c.Done() {
+		*reply = GetTask_Finished
+		return nil
+	}
+
+	var task *TaskInfo
+
+	switch c.CoordinatorPhase {
+	case MapPhase:
+		task = c.chooseMapTask()
+	case ReducePhase:
+		task = c.chooseReduceTask()
+	default:
+		task = nil
+	}
+	if task != nil {
+		*reply = GetTask_HasTask
+	} else {
+		*reply = GetTask_Wait
+	}
 	return nil
 }
 
@@ -128,24 +199,35 @@ func (c *Coordinator) schedule() {
 			case WorkerGetTask: // 处理任务分配
 				task := c.chooseTask()
 				if task != nil {
-					log.Printf("[GetTask] Assign Task %d to Worker", task.TaskId)
+					// log.Printf("[GetTask] Assign Task %d to Worker", task.TaskId)
 					msg.Task = *task
 					c.MessageChan <- msg
 				}
-			case WorkerHeartBeat: // 处理心跳
-				log.Printf("[HeartBeat] Receive HeartBeat from Task %d", msg.Task.TaskId)
 			case WorkerTaskDone: // 处理任务完成
-				log.Printf("[TaskDone] Task %d is done", msg.Task.TaskId)
+				// log.Printf("[TaskDone] Task %d is done", msg.Task.TaskId)
 				taskId := msg.Task.TaskId
 				if msg.Task.TaskType == MapTask {
 					c.MapTasks[taskId].Status = Completed
 				} else {
 					c.ReduceTasks[taskId].Status = Completed
 				}
-			case WorkerTaskFailed:
-				// 处理任务失败
-			case WorkerTaskTimeOut:
-				// 处理任务超时
+				c.updatePhase()
+			case WorkerTaskTimeOut: // 检查任务是否超时
+				task := msg.Task
+				taskId := msg.Task.TaskId
+				if task.Status == Completed {
+					break // 如果任务已经完成，则不需要处理
+				}
+				// 如果任务没有完成，则认为任务失败
+				log.Printf("[TaskTimeOut] Task %d is time out", task.TaskId)
+				// 若任务失败，则将任务状态置为Unstarted
+				if msg.Task.TaskType == MapTask {
+					c.MapTasks[taskId].Status = Unstarted
+				} else {
+					c.ReduceTasks[taskId].Status = Unstarted
+				}
+			default:
+				log.Printf("Unknown message type")
 			}
 		}
 	}
@@ -162,7 +244,6 @@ func (c *Coordinator) server() {
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
-	log.Printf("Coordinator is listening on %s", sockname)
 	go http.Serve(l, nil)
 }
 
@@ -183,13 +264,27 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	// 此处认为任务已经完成了分片，所以可以直接来分配任务
 	for _, file := range files {
 		task := TaskInfo{
-			MapFilePath: file,
-			TaskType:    MapTask,
-			Status:      Unstarted,
-			TaskId:      len(c.MapTasks),
+			MapFilePath:          file,
+			TaskType:             MapTask,
+			Status:               Unstarted,
+			TaskId:               len(c.MapTasks),
+			IntermediateFilePath: "mr-tmp-" + strconv.Itoa(len(c.MapTasks)),
 		}
 		c.MapTasks = append(c.MapTasks, task)
 	}
+
+	// Reduce任务的初始化
+	for i := 0; i < nReduce; i++ {
+		task := TaskInfo{
+			TaskType:             ReduceTask,
+			Status:               Unstarted,
+			TaskId:               i,
+			IntermediateFilePath: "mr-tmp-" + strconv.Itoa(i),
+			MapTaskCount:         len(c.MapTasks),
+		}
+		c.ReduceTasks = append(c.ReduceTasks, task)
+	}
+
 	c.MessageChan = make(chan ThreadMessage)
 	c.server()
 	go c.schedule()
