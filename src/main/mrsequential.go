@@ -34,6 +34,7 @@ func main() {
 	// read each input file,
 	// pass it to Map,
 	// accumulate the intermediate Map output.
+	// wc.so pg-being_ernest.txt pg-dorian_gray.txt pg-frankenstein.txt pg-grimm.txt pg-huckleberry_finn.txt pg-metamorphosis.txt pg-sherlock_holmes.txt pg-tom_sawyer.txt
 	//
 	intermediate := []mr.KeyValue{}
 	for _, filename := range os.Args[2:] {
@@ -86,10 +87,8 @@ func main() {
 	ofile.Close()
 }
 
-//
 // load the application Map and Reduce functions
 // from a plugin file, e.g. ../mrapps/wc.so
-//
 func loadPlugin(filename string) (func(string, string) []mr.KeyValue, func(string, []string) string) {
 	p, err := plugin.Open(filename)
 	if err != nil {
