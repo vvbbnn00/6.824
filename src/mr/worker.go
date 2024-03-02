@@ -32,7 +32,7 @@ func Worker(mapf func(string, string) []KeyValue,
 	for {
 		hasTask := callHasMoreTask()
 		if !hasTask {
-			log.Printf("No more task, worker exit\n")
+			log.Printf("[Worker] No more task, worker exit\n")
 			return
 		}
 
@@ -58,19 +58,19 @@ func Worker(mapf func(string, string) []KeyValue,
 func doMapTask(task *TaskInfo, mapf func(string, string) []KeyValue) {
 	intermediateFile, err := os.Create(task.IntermediateFilePath)
 	if err != nil {
-		log.Fatalf("cannot create %v", task.IntermediateFilePath)
+		log.Fatalf("[doMapTask] cannot create %s", task.IntermediateFilePath)
 	}
 	defer intermediateFile.Close()
 
 	file, err := os.OpenFile(task.MapFilePath, os.O_RDONLY, 0)
 	if err != nil {
-		log.Fatalf("cannot open %v", task.MapFilePath)
+		log.Fatalf("[doMapTask] cannot open %s", task.MapFilePath)
 	}
 	defer file.Close()
 
 	content, err := io.ReadAll(file)
 	if err != nil {
-		log.Fatalf("cannot read %v", task.MapFilePath)
+		log.Fatalf("[doMapTask] cannot read %s", task.MapFilePath)
 	}
 
 	kva := mapf(task.MapFilePath, string(content))
@@ -78,7 +78,7 @@ func doMapTask(task *TaskInfo, mapf func(string, string) []KeyValue) {
 	for _, kv := range kva {
 		err := enc.Encode(&kv)
 		if err != nil {
-			log.Fatalf("cannot encode %v", kv)
+			log.Fatalf("[doMapTask] cannot encode %v", kv)
 		}
 	}
 }
@@ -88,7 +88,7 @@ func doReduceTask(task *TaskInfo, reducef func(string, []string) string) {
 	finalTaskPath := "mr-out-" + strconv.Itoa(task.TaskId)
 	finalTaskFile, err := os.Create(finalTaskPath)
 	if err != nil {
-		log.Fatalf("cannot create %v", finalTaskPath)
+		log.Fatalf("[doReduceTask] cannot create %s", finalTaskPath)
 	}
 	defer finalTaskFile.Close()
 
@@ -98,7 +98,7 @@ func doReduceTask(task *TaskInfo, reducef func(string, []string) string) {
 		intermediateFilePath := "mr-tmp-" + strconv.Itoa(i)
 		file, err := os.OpenFile(intermediateFilePath, os.O_RDONLY, 0)
 		if err != nil {
-			log.Fatalf("cannot open %v", intermediateFilePath)
+			log.Fatalf("[doReduceTask] cannot open %s", intermediateFilePath)
 		}
 		defer file.Close()
 		dec := json.NewDecoder(file)
@@ -130,7 +130,7 @@ func callGetTask() *TaskInfo {
 	if ok {
 		return &reply
 	} else {
-		log.Printf("call failed!\n")
+		log.Printf("[callGetTask] call failed!\n")
 	}
 
 	return nil
@@ -141,7 +141,7 @@ func callTaskDone(task *TaskInfo) {
 	reply := TaskDoneReply{}
 	ok := call("Coordinator.TaskDone", &task, &reply)
 	if !ok {
-		log.Printf("call failed!\n")
+		log.Printf("[callTaskDone] call failed!\n")
 	}
 }
 
@@ -149,16 +149,16 @@ func callTaskDone(task *TaskInfo) {
 func callHasMoreTask() bool {
 	//log.Printf("Ask for more task\n")
 	args := GetTaskArgs{}
-	reply := GetTask_Wait
+	reply := GettaskWait
 	ok := call("Coordinator.HasMoreTask", &args, &reply)
 	if ok {
-		if reply == GetTask_Wait {
+		if reply == GettaskWait {
 			time.Sleep(1 * time.Second)
 			return callHasMoreTask()
 		}
-		return reply == GetTask_HasTask
+		return reply == GettaskHastask
 	} else {
-		log.Printf("call failed!\n")
+		log.Printf("[callHasMoreTask] call failed!\n")
 	}
 
 	return false

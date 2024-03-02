@@ -9,15 +9,14 @@ package mr
 import "os"
 import "strconv"
 
-// Add your RPC definitions here.
 type GetTaskArgs struct{}
 
 type GetTaskReply int
 
 const (
-	GetTask_HasTask = iota
-	GetTask_Wait
-	GetTask_Finished
+	GettaskHastask = iota
+	GettaskWait
+	GettaskFinished
 )
 
 type HeartBeatArgs struct {

@@ -3,6 +3,7 @@ package mr
 import (
 	"log"
 	"strconv"
+	"sync"
 	"time"
 )
 import "net"
@@ -51,12 +52,14 @@ const (
 	WorkerHeartBeat
 	WorkerTaskDone
 	WorkerTaskTimeOut
+	HasMoreTask
 )
 
 // ThreadMessage 用于线程之间传递消息
 type ThreadMessage struct {
-	MsgType ThreadMessageType
-	Task    TaskInfo
+	MsgType          ThreadMessageType
+	Task             TaskInfo
+	HasMoreTaskReply GetTaskReply
 }
 
 type Coordinator struct {
@@ -71,6 +74,8 @@ type Coordinator struct {
 	MessageChan chan ThreadMessage
 
 	CoordinatorPhase CoordinatorPhase // 当前协调器的阶段
+
+	phaseRWLock sync.RWMutex
 }
 
 // chooseMapTask 选择一个Map任务
@@ -94,25 +99,23 @@ func (c *Coordinator) chooseReduceTask() *TaskInfo {
 }
 
 // checkTaskTimeout 发起一个定时函数，检查任务是否超时
-func (c *Coordinator) checkTaskTimeout(info *TaskInfo) {
+func (c *Coordinator) checkTaskTimeout(info TaskInfo) {
 	time.Sleep(TaskTimeOut)
 	// 向 MessageChan 发送消息
-	c.MessageChan <- ThreadMessage{MsgType: WorkerTaskTimeOut, Task: *info}
+	c.MessageChan <- ThreadMessage{MsgType: WorkerTaskTimeOut, Task: info}
 }
 
 // chooseTask 选择一个任务
 func (c *Coordinator) chooseTask() *TaskInfo {
+	c.phaseRWLock.RLock()
+	phase := c.CoordinatorPhase
+	c.phaseRWLock.RUnlock()
+
 	task := &TaskInfo{}
-	if c.CoordinatorPhase == MapPhase {
+	if phase == MapPhase {
 		task = c.chooseMapTask()
 	} else {
 		task = c.chooseReduceTask()
-	}
-
-	if task != nil {
-		task.StartTime = time.Now()
-		task.Status = InProgress
-		go c.checkTaskTimeout(task)
 	}
 
 	return task
@@ -120,6 +123,9 @@ func (c *Coordinator) chooseTask() *TaskInfo {
 
 // updatePhase 更新阶段，判断是否需要切换阶段
 func (c *Coordinator) updatePhase() {
+	c.phaseRWLock.Lock()
+	defer c.phaseRWLock.Unlock()
+
 	// 如果当前阶段是Map阶段，判断是否所有的Map任务都已经完成
 	if c.CoordinatorPhase == MapPhase {
 		for i := 0; i < len(c.MapTasks); i++ {
@@ -167,26 +173,11 @@ func (c *Coordinator) TaskDone(args *TaskInfo, reply *TaskDoneReply) error {
 
 // HasMoreTask 暴露给Worker的RPC接口
 func (c *Coordinator) HasMoreTask(args *GetTaskArgs, reply *GetTaskReply) error {
-	if c.Done() {
-		*reply = GetTask_Finished
-		return nil
+	c.MessageChan <- ThreadMessage{
+		MsgType: HasMoreTask,
 	}
-
-	var task *TaskInfo
-
-	switch c.CoordinatorPhase {
-	case MapPhase:
-		task = c.chooseMapTask()
-	case ReducePhase:
-		task = c.chooseReduceTask()
-	default:
-		task = nil
-	}
-	if task != nil {
-		*reply = GetTask_HasTask
-	} else {
-		*reply = GetTask_Wait
-	}
+	msg := <-c.MessageChan
+	*reply = msg.HasMoreTaskReply
 	return nil
 }
 
@@ -199,6 +190,9 @@ func (c *Coordinator) schedule() {
 			case WorkerGetTask: // 处理任务分配
 				task := c.chooseTask()
 				if task != nil {
+					task.StartTime = time.Now()
+					task.Status = InProgress
+					go c.checkTaskTimeout(*task)
 					// log.Printf("[GetTask] Assign Task %d to Worker", task.TaskId)
 					msg.Task = *task
 					c.MessageChan <- msg
@@ -213,19 +207,65 @@ func (c *Coordinator) schedule() {
 				}
 				c.updatePhase()
 			case WorkerTaskTimeOut: // 检查任务是否超时
-				task := msg.Task
 				taskId := msg.Task.TaskId
+
+				task := &TaskInfo{} // 根据TaskType来选择任务，此处不能直接使用task，因为task是一个值拷贝
+				if msg.Task.TaskType == MapTask {
+					task = &c.MapTasks[taskId]
+				} else {
+					task = &c.ReduceTasks[taskId]
+				}
+
 				if task.Status == Completed {
 					break // 如果任务已经完成，则不需要处理
 				}
+
 				// 如果任务没有完成，则认为任务失败
 				log.Printf("[TaskTimeOut] Task %d is time out", task.TaskId)
+
 				// 若任务失败，则将任务状态置为Unstarted
-				if msg.Task.TaskType == MapTask {
-					c.MapTasks[taskId].Status = Unstarted
-				} else {
-					c.ReduceTasks[taskId].Status = Unstarted
+				task.Status = Unstarted
+
+			case HasMoreTask: // 判断是否还有任务
+				reply := GettaskWait
+
+				// 判断是否已经处于Finished状态
+				if c.Done() {
+					// 返回结果
+					replyMsg := ThreadMessage{
+						HasMoreTaskReply: GetTaskReply(GettaskFinished),
+					}
+					c.MessageChan <- replyMsg
+					break
 				}
+
+				// 试探性的选择一个任务
+				var task *TaskInfo
+
+				// 根据当前的阶段选择任务
+				c.phaseRWLock.RLock()
+				switch c.CoordinatorPhase {
+				case MapPhase:
+					task = c.chooseMapTask()
+				case ReducePhase:
+					task = c.chooseReduceTask()
+				default:
+					task = nil
+				}
+				c.phaseRWLock.RUnlock()
+
+				// 判断是否有任务
+				if task != nil {
+					reply = GettaskHastask
+				} else {
+					reply = GettaskWait // 暂时没有任务，等待
+				}
+
+				// 返回结果
+				replyMsg := ThreadMessage{
+					HasMoreTaskReply: GetTaskReply(reply),
+				}
+				c.MessageChan <- replyMsg
 			default:
 				log.Printf("Unknown message type")
 			}
@@ -250,6 +290,9 @@ func (c *Coordinator) server() {
 // Done main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
+	c.phaseRWLock.RLock()
+	defer c.phaseRWLock.RUnlock()
+
 	return c.CoordinatorPhase == Finished
 }
 
