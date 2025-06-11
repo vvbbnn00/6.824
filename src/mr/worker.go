@@ -139,7 +139,7 @@ func callGetTask() *TaskInfo {
 // callTaskDone 用于向coordinator汇报任务完成
 func callTaskDone(task *TaskInfo) {
 	reply := TaskDoneReply{}
-	ok := call("Coordinator.TaskDone", &task, &reply)
+	ok := call("Coordinator.TaskDone", task, &reply)
 	if !ok {
 		log.Printf("[callTaskDone] call failed!\n")
 	}
